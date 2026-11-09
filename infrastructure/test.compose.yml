@@ -1,0 +1,15 @@
+name: whatsapp-memory-tests
+services:
+  db:
+    image: pgvector/pgvector:0.8.1-pg17
+    environment:
+      POSTGRES_DB: memory_test
+      POSTGRES_USER: memory
+      POSTGRES_PASSWORD: memory
+    ports: ["127.0.0.1:55433:5432"]
+    tmpfs: ["/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory -d memory_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 20

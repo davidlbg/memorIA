@@ -1,0 +1,18 @@
+# Use with the root Compose file and an isolated --project-name.
+services:
+  db:
+    ports: !override ["127.0.0.1:58033:5432"]
+  migrate:
+    env_file: !override ["${ACCEPTANCE_ENV_FILE:?Fixture env required}"]
+  backend:
+    env_file: !override ["${ACCEPTANCE_ENV_FILE:?Fixture env required}"]
+    ports: !override ["127.0.0.1:58002:8000"]
+  worker:
+    env_file: !override ["${ACCEPTANCE_ENV_FILE:?Fixture env required}"]
+  indexer:
+    env_file: !override ["${ACCEPTANCE_ENV_FILE:?Fixture env required}"]
+  whatsapp-connector:
+    env_file: !override ["${ACCEPTANCE_ENV_FILE:?Fixture env required}"]
+secrets:
+  whatsapp_key:
+    file: "${ACCEPTANCE_KEY_FILE:?Fixture key required}"

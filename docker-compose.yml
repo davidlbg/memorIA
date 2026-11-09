@@ -1,0 +1,93 @@
+name: whatsapp-memory
+services:
+  db:
+    image: pgvector/pgvector:0.8.1-pg17
+    environment:
+      POSTGRES_DB: memory
+      POSTGRES_USER: memory
+      POSTGRES_PASSWORD: memory
+    ports: ["127.0.0.1:55432:5432"]
+    volumes: ["memory_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory -d memory"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  migrate:
+    build: ./backend
+    env_file: ${MEMORY_ENV_FILE:-.env}
+    environment:
+      DATABASE_URL: postgresql+psycopg://memory:memory@db:5432/memory
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db: {condition: service_healthy}
+  backend:
+    build: ./backend
+    env_file:
+      - path: ${MEMORY_ENV_FILE:-.env}
+      - path: .env.connector
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://memory:memory@db:5432/memory
+      AI_CREDENTIALS_KEY_FILE: /run/secrets/ai_key
+    secrets: [ai_key]
+    ports: ["127.0.0.1:${BACKEND_PORT:-8000}:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  worker:
+    build: ./backend
+    env_file: ${MEMORY_ENV_FILE:-.env}
+    environment:
+      DATABASE_URL: postgresql+psycopg://memory:memory@db:5432/memory
+      AI_CREDENTIALS_KEY_FILE: /run/secrets/ai_key
+    secrets: [ai_key]
+    command: ["python", "-m", "app.workers.runner"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  indexer:
+    build: ./backend
+    env_file: ${MEMORY_ENV_FILE:-.env}
+    environment:
+      DATABASE_URL: postgresql+psycopg://memory:memory@db:5432/memory
+      AI_CREDENTIALS_KEY_FILE: /run/secrets/ai_key
+    secrets: [ai_key]
+    command: ["python", "-m", "app.workers.indexer"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  whatsapp-connector:
+    profiles: ["whatsapp"]
+    build:
+      context: .
+      dockerfile: services/whatsapp-connector/Dockerfile
+    env_file:
+      - path: .env.connector
+        required: false
+    environment:
+      CONNECTOR_BACKEND_URL: http://127.0.0.1:8000
+      CONNECTOR_VAULT_FILE: /data/session.enc
+      CONNECTOR_KEY_FILE: /run/secrets/whatsapp_key
+    # The fixed localhost control port also prevents two writers opening the
+    # shared vault. Do not scale or split this network namespace in v0.2.
+    network_mode: service:backend
+    depends_on:
+      backend: {condition: service_started}
+    volumes: ["whatsapp_session:/data"]
+    secrets: [whatsapp_key]
+    healthcheck:
+      test: ["CMD","node","services/whatsapp-connector/dist/healthcheck.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+volumes:
+  memory_data:
+  whatsapp_session:
+secrets:
+  ai_key:
+    file: .local/secrets/ai.key
+  whatsapp_key:
+    file: .local/secrets/whatsapp.key

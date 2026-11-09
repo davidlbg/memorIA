@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whatsapp-memory"
+version = "0.2.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.121,<1", "uvicorn[standard]>=0.34,<1", "pydantic-settings>=2.7,<3",
+  "sqlalchemy>=2.0.38,<3", "psycopg[binary]>=3.2,<4", "alembic>=1.14,<2",
+  "pgvector>=0.3.6,<1", "python-multipart>=0.0.20,<1", "httpx>=0.28,<1",
+  "mcp>=1.12,<2", "tzdata>=2025.1", "cryptography>=50,<51"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.11,<1", "mypy>=1.15,<2"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["database: requires an explicitly configured disposable PostgreSQL database"]
+
+[tool.ruff]
+extend-exclude = ["build"]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "B008"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+check_untyped_defs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true

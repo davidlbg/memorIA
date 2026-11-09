@@ -1,0 +1,6 @@
+{
+  "name":"@whatsapp-memory/whatsapp-connector","version":"0.2.0","private":true,"type":"module","engines":{"node":">=24.0.0"},
+  "scripts":{"build":"tsc --noEmit && esbuild src/index.ts src/healthcheck.ts --bundle --platform=node --format=esm --outdir=dist --external:@whiskeysockets/baileys --external:qrcode --external:pino --external:zod","typecheck":"tsc --noEmit","test":"vitest run","lint":"eslint .","start":"node dist/index.js"},
+  "dependencies":{"@whiskeysockets/baileys":"7.0.0-rc14","@whatsapp-memory/shared-types":"*","zod":"4.6.7","qrcode":"1.5.4","pino":"9.14.0"},
+  "devDependencies":{"@types/node":"^24.0.0","@types/qrcode":"^1.5.5","typescript":"^5.9.3","vitest":"5.1.0","esbuild":"0.25.12","eslint":"^10.14.0","@eslint/js":"^10.0.1","typescript-eslint":"^8.72.1"}
+}

@@ -1,0 +1,4 @@
+{
+  "qwen3.5:2b": "sha256:0689d44085e06d165161a8a9a1731344278cfb5aade63a3c3dbdb48ab54b130a",
+  "qwen3-embedding:0.6b": "sha256:ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d"
+}

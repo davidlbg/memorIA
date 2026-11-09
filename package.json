@@ -1,0 +1,21 @@
+{
+  "name": "whatsapp-memory-workspace",
+  "private": true,
+  "version": "0.2.0",
+  "workspaces": [
+    "apps/extension",
+    "packages/shared-types",
+    "services/whatsapp-connector"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/extension",
+    "build": "npm run build -w apps/extension && npm run build -w services/whatsapp-connector",
+    "typecheck": "npm run typecheck -w apps/extension && npm run typecheck -w services/whatsapp-connector",
+    "lint": "npm run lint -w apps/extension && npm run lint -w services/whatsapp-connector",
+    "test": "npm run test -w apps/extension && npm run test -w services/whatsapp-connector",
+    "test:e2e": "npm run test:e2e -w apps/extension",
+    "test:extension": "npm run test:extension -w apps/extension",
+    "test:integration": "npm run test:integration -w apps/extension",
+    "connector:start": "node --env-file=.env.connector services/whatsapp-connector/dist/index.js"
+  }
+}

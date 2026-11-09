@@ -1,0 +1,13 @@
+{
+  "name": "@whatsapp-memory/shared-types",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./whatsapp": "./whatsapp.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

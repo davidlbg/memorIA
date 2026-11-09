@@ -1,0 +1,67 @@
+# Local personal deployment, separated from all synthetic acceptance volumes.
+name: whatsapp-memory-personal
+services:
+  db:
+    restart: unless-stopped
+    ports: !override []
+  migrate:
+    image: whatsapp-memory-local-backend:0.2.0
+    env_file: !override [.local/personal/auth.env, .local/personal/runtime.env]
+  backend:
+    image: whatsapp-memory-local-backend:0.2.0
+    env_file: !override [.local/personal/auth.env, .local/personal/runtime.env]
+    ports: !override ["127.0.0.1:58003:8000"]
+    networks: [default, ai]
+    environment:
+      AI_USAGE_ROLE: queries
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,httpx; httpx.get('http://127.0.0.1:8000/api/v1/health',headers={'Authorization':'Bearer '+os.environ['AUTH_SECRET']},timeout=5).raise_for_status()"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+  worker:
+    image: whatsapp-memory-local-backend:0.2.0
+    env_file: !override [.local/personal/auth.env, .local/personal/runtime.env]
+    networks: [default, ai]
+    environment:
+      AI_USAGE_ROLE: memories
+  indexer:
+    image: whatsapp-memory-local-backend:0.2.0
+    env_file: !override [.local/personal/auth.env, .local/personal/runtime.env]
+    networks: [default, ai]
+    environment:
+      AI_USAGE_ROLE: indexing
+  whatsapp-connector:
+    image: whatsapp-memory-local-connector:0.2.0
+    env_file: !override [.local/personal/auth.env, .local/personal/runtime.env]
+    depends_on:
+      backend: {condition: service_healthy}
+  ollama:
+    profiles: ["local-ai"]
+    image: ollama/ollama@sha256:bdf98cbc256dd2152d074bee07dc788745026eaa8a8667498a9a5cf237772ea4
+    environment:
+      OLLAMA_NO_CLOUD: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      # Bound llama-server's host prompt cache independently of model weights.
+      LLAMA_ARG_CACHE_RAM: "512"
+    volumes: ["local_models:/root/.ollama"]
+    networks: [ai]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+networks:
+  ai:
+    internal: true
+volumes:
+  local_models:
+    external: true
+    name: wm_local_models
+secrets:
+  ai_key:
+    file: .local/personal/ai.key
+  whatsapp_key:
+    file: .local/personal/whatsapp.key

@@ -1,0 +1,38 @@
+# Configuração e dados privados
+.env*
+!.env.example
+!.env.*.example
+.local/
+*.key
+*.pem
+*.p12
+*.pfx
+*.enc
+*.dump
+*.sql.gz
+*.sqlite*
+*.db
+*.log
+# Relatórios internos preservados localmente
+docs/MEMORIA_ACCEPTANCE.md
+docs/MEMORIA_REDESIGN.md
+# Dependências, saídas e caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+dist/
+build/
+coverage/
+*.egg-info/
+.impeccable/
+test-results/
+playwright-report/
+# Arquivos do sistema/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

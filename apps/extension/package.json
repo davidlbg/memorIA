@@ -1,0 +1,49 @@
+{
+  "name": "@whatsapp-memory/extension",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:e2e": "playwright test --project=sidepanel",
+    "test:extension": "playwright test --project=extension",
+    "test:integration": "playwright test --project=integration",
+    "format:check": "prettier --check src tests *.ts *.js *.json index.html"
+  },
+  "dependencies": {
+    "@fontsource-variable/catamaran": "^5.3.0",
+    "@fontsource-variable/epilogue": "^5.3.0",
+    "@fontsource-variable/manrope": "^5.2.0",
+    "@whatsapp-memory/shared-types": "*",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.51.0",
+    "@tailwindcss/vite": "^4.0.8",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.2.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/chrome": "^0.0.306",
+    "@types/node": "^22.13.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^26.0.0",
+    "prettier": "^3.9.10",
+    "tailwindcss": "^4.0.8",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.72.1",
+    "vite": "^6.1.0",
+    "vitest": "^5.1.0"
+  }
+}

@@ -1,0 +1,21 @@
+# Synthetic local-model validation only. Never points at the personal database.
+name: whatsapp-memory-semantic
+services:
+  db:
+    ports: !override ["127.0.0.1:58035:5432"]
+  migrate:
+    env_file: !override [.local/semantic/fixture.env]
+  backend:
+    env_file: !override [.local/semantic/fixture.env]
+    ports: !override ["127.0.0.1:58004:8000"]
+  worker:
+    env_file: !override [.local/semantic/fixture.env]
+  indexer:
+    env_file: !override [.local/semantic/fixture.env]
+  whatsapp-connector:
+    env_file: !override [.local/semantic/fixture.env]
+secrets:
+  ai_key:
+    file: .local/semantic/ai.key
+  whatsapp_key:
+    file: .local/semantic/fixture.key
