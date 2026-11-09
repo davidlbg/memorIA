@@ -1,0 +1,139 @@
+# First handoff only: existing images and schema, no build or upgrade.
+# All Cortex-specific paths and resources must be explicitly supplied.
+x-runtime: &runtime
+  # Forward termination signals to Python workers instead of leaving them as PID 1.
+  init: true
+  image: ${MEMORIA_BACKEND_IMAGE:?}
+  pull_policy: never
+  env_file:
+    - ${MEMORIA_AUTH_ENV_FILE:?}
+    - ${MEMORIA_RUNTIME_ENV_FILE:?}
+  restart: unless-stopped
+  stop_grace_period: 90s
+  networks: [default, ai]
+
+x-backend-environment: &backend-environment
+  DATABASE_URL: ${MEMORIA_DATABASE_URL:?}
+  AI_CREDENTIALS_KEY_FILE: /run/secrets/ai_key
+
+services:
+  db:
+    image: ${MEMORIA_DB_IMAGE:?}
+    pull_policy: never
+    env_file: ["${MEMORIA_DB_ENV_FILE:?}"]
+    # Coolify validates external names before Compose expands required values.
+    environment:
+      MEMORIA_VOLUME_BINDING_GUARD: ${MEMORIA_DB_VOLUME:?}
+    volumes: ["memory_data:/var/lib/postgresql/data"]
+    restart: unless-stopped
+    stop_grace_period: 90s
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *runtime
+    # Intentionally read-only. Future schema upgrades require a separate plan.
+    command:
+      - python
+      - -c
+      - >-
+        import os,sys; from sqlalchemy import create_engine,text;
+        e=create_engine(os.environ['DATABASE_URL']);
+        c=e.connect();
+        v=c.execute(text('SELECT version_num FROM alembic_version')).scalars().all();
+        c.close(); e.dispose();
+        sys.exit(0 if v==['0009'] else 'Unexpected schema revision: migration is blocked')
+    environment: *backend-environment
+    networks: [default]
+    restart: "no"
+    depends_on:
+      db: {condition: service_healthy}
+    labels: ["exclude_from_hc=true"]
+
+  backend:
+    <<: *runtime
+    environment:
+      <<: *backend-environment
+      AI_USAGE_ROLE: queries
+    secrets: [ai_key]
+    ports: ["${MEMORIA_BIND_IP:?}:${MEMORIA_HOST_PORT:?}:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,httpx; httpx.get('http://127.0.0.1:8000/api/v1/health',headers={'Authorization':'Bearer '+os.environ['AUTH_SECRET']},timeout=5).raise_for_status()"
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
+
+  worker:
+    <<: *runtime
+    environment:
+      <<: *backend-environment
+      AI_USAGE_ROLE: memories
+    secrets: [ai_key]
+    command: [python, -m, app.workers.runner]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  indexer:
+    <<: *runtime
+    environment:
+      <<: *backend-environment
+      AI_USAGE_ROLE: indexing
+    secrets: [ai_key]
+    command: [python, -m, app.workers.indexer]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  whatsapp-connector:
+    image: ${MEMORIA_CONNECTOR_IMAGE:?}
+    pull_policy: never
+    env_file:
+      - ${MEMORIA_AUTH_ENV_FILE:?}
+      - ${MEMORIA_RUNTIME_ENV_FILE:?}
+    environment:
+      CONNECTOR_BACKEND_URL: http://127.0.0.1:8000
+      CONNECTOR_VAULT_FILE: /data/session.enc
+      CONNECTOR_KEY_FILE: /run/secrets/whatsapp_key
+      MEMORIA_VOLUME_BINDING_GUARD: ${MEMORIA_SESSION_VOLUME:?}
+    network_mode: service:backend
+    volumes: ["whatsapp_session:/data"]
+    secrets: [whatsapp_key]
+    depends_on:
+      backend: {condition: service_healthy}
+    restart: unless-stopped
+    stop_grace_period: 90s
+    healthcheck:
+      test: [CMD, node, services/whatsapp-connector/dist/healthcheck.js]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  memory_data:
+    external: true
+    name: ${MEMORIA_DB_VOLUME}
+  whatsapp_session:
+    external: true
+    name: ${MEMORIA_SESSION_VOLUME}
+
+networks:
+  default:
+    internal: ${MEMORIA_NETWORK_INTERNAL:?}
+  ai:
+    internal: true
+
+secrets:
+  ai_key:
+    file: ${MEMORIA_AI_KEY_FILE:?}
+  whatsapp_key:
+    file: ${MEMORIA_WHATSAPP_KEY_FILE:?}
