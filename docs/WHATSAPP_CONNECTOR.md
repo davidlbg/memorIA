@@ -217,3 +217,41 @@ Builds e capturas em `.local` são artefatos ignorados, com dados sintéticos.
 ## Aceite operacional v0.2
 
 A matriz de auditoria, isolamento do ensaio e roteiro humano estão no [checklist de aceite](ACCEPTANCE_CHECKLIST.md). A release não está aprovada enquanto os critérios obrigatórios estiverem pendentes. As migrations 0001–0004 são preservadas; ensaios não usam volumes de dados pessoais.
+
+## Reconciliação explícita de históricos PN/LID já separados
+
+Quando um par nativo PN/LID chega depois de ambos os identificadores terem criado
+históricos, a API mantém o bloqueio 409 até existir uma associação aprovada pelo
+operador. Preserve primeiro banco, cofre e chave; confira a conta, a evidência do
+par e possíveis colisões de identificador nativo em uma cópia isolada.
+
+`WHATSAPP_CHAT_ALIAS_GROUPS` recebe uma lista JSON; o padrão é `[]`. Cada item tem
+`account_id` (hash da conta autenticada), `pn_jid` (endereço `@s.whatsapp.net`) e
+`lid_jid` (endereço `@lid`). Identificadores não podem participar de mais de um
+grupo da mesma conta. O Compose do Coolify repassa essa configuração sem alterar
+os arquivos de ambiente existentes. Os valores reais são privados e devem fazer
+parte dos backups de configuração, nunca do Git ou dos relatórios públicos.
+
+Essa associação não funde nem apaga chats, conversas, contatos ou mensagens.
+Uma mensagem já conhecida é localizada pelo identificador nativo e direção
+entre os históricos associados; edições, revogações e replays seguem para a
+conversa original. Mensagens novas seguem o identificador primário do evento.
+Os IDs e os acessos aos dois históricos são preservados. Aliases de contato do
+interlocutor não são atribuídos ao contato da própria conta em mensagens enviadas.
+Se já houver dois contatos legados para o par aprovado, ambos permanecem: uma
+edição conserva o remetente histórico e uma mensagem nova segue o identificador
+primário do remetente. Fora da autorização explícita, a seleção nativa anterior
+de contatos é mantida. A validação considera os dois lados de um par de remetentes,
+incluindo `participantAlt`, e todos os aliases persistidos dos chats candidatos;
+uma identidade terceira não pode pegar carona em um identificador aprovado.
+
+Colisões ambíguas, terceiros identificadores e pares não aprovados continuam
+bloqueados. Exclusões locais mantêm seus tombstones; a associação não restaura
+uma conversa que o usuário apagou. O payload e o `event_id` originais não são
+reescritos, e a confirmação continua ocorrendo apenas após commit. Um replay
+após falha entre commit e confirmação é deduplicado pelo registro de eventos.
+
+Não é necessária mudança de esquema para esse mecanismo. Remover a configuração
+não apaga os dados, mas volta a bloquear entregas que dependam dela; restaure-a
+junto com o banco em uma recuperação. Isso é uma autorização operacional para
+um par conferido, não um algoritmo automático de união de identidades.

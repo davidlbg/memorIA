@@ -4,13 +4,14 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import WhatsAppChatAliasGroup, get_settings
 from app.core.memory.pipeline import consolidate
 from app.models.entities import (
+    Contact,
     Conversation,
     ImportJob,
     Memory,
@@ -102,19 +103,120 @@ def update_status(session: Session, request: ConnectionUpdate) -> None:
     connection.last_status_at = now()
 
 
+def configured_alias_group(account_id: str, jids: set[str]) -> WhatsAppChatAliasGroup | None:
+    groups = [group for group in get_settings().whatsapp_chat_alias_groups
+              if group.account_id == account_id
+              and jids.intersection((group.pn_jid, group.lid_jid))]
+    if len(groups) > 1 or (groups and not jids.issubset((groups[0].pn_jid, groups[0].lid_jid))):
+        raise HTTPException(409, "Identificadores fora da reconciliação aprovada")
+    return groups[0] if groups else None
+
+
+def approved_alias_group(event: MessageEvent) -> WhatsAppChatAliasGroup | None:
+    return configured_alias_group(event.account_id, {
+        value for value in (event.chat_jid, event.chat_jid_alt) if value
+    })
+
+
+def sender_alias(event: MessageEvent) -> str | None:
+    # Direct inbound chat identities identify the peer, never our outgoing account.
+    if event.from_me or event.sender_jid != event.chat_jid or event.chat_jid.endswith("@g.us"):
+        return event.sender_jid_alt
+    group = approved_alias_group(event)
+    if group:
+        alternate = group.lid_jid if event.sender_jid == group.pn_jid else group.pn_jid
+        if event.sender_jid_alt and event.sender_jid_alt != alternate:
+            raise HTTPException(409, "Alias de remetente fora da reconciliação aprovada")
+        return alternate
+    # A chat alternate is not a blanket authorization to reconcile contact rows.
+    # Preserve the original native sender semantics outside approved groups.
+    return event.sender_jid_alt
+
+
+def ensure_event_contact(
+    session: Session, conversation_id: UUID, event: MessageEvent, name: str,
+    *, preferred_contact_id: UUID | None = None,
+) -> Contact:
+    if event.sender_jid is None:
+        raise HTTPException(422, "Remetente ausente")
+    alias = sender_alias(event)
+    # Check both directions: an unrelated primary sender cannot claim an approved
+    # peer as its alternate, including native participantAlt on outgoing messages.
+    group = configured_alias_group(event.account_id, {
+        value for value in (event.sender_jid, alias) if value
+    })
+    if group:
+        identifiers = {group.pn_jid, group.lid_jid}
+        if alias and alias not in identifiers:
+            raise HTTPException(409, "Alias de contato fora da reconciliação aprovada")
+        contacts = list(session.scalars(select(Contact).where(
+            Contact.conversation_id == conversation_id,
+            or_(Contact.external_identifier.in_(identifiers), Contact.external_alias.in_(identifiers)),
+        )))
+        if len(contacts) > 1:
+            if any({v for v in (c.external_identifier, c.external_alias) if v} - identifiers
+                   for c in contacts):
+                raise HTTPException(409, "Contato contém identidade não reconciliada")
+            # Keep both contact records and all historical references. An edit uses
+            # its existing sender; a new message follows its native primary sender.
+            choices = [c for c in contacts if c.id == preferred_contact_id] if preferred_contact_id else [
+                c for c in contacts if c.external_identifier == event.sender_jid
+            ]
+            if len(choices) != 1:
+                raise HTTPException(409, "Contato ambíguo na reconciliação aprovada")
+            return choices[0]
+        if alias is None:
+            alias = group.lid_jid if event.sender_jid == group.pn_jid else group.pn_jid
+    return ensure_contact(session, conversation_id, name, event.sender_jid, alias)
+
+
 def chat_for(session: Session, event: MessageEvent) -> tuple[WhatsAppChat, Conversation | None]:
     jids = {value for value in (event.chat_jid, event.chat_jid_alt) if value}
+    group = approved_alias_group(event)
+    lookup_jids = {group.pn_jid, group.lid_jid} if group else jids
     aliases = list(
         session.scalars(
             select(WhatsAppChatAlias).where(
-                WhatsAppChatAlias.account_id == event.account_id, WhatsAppChatAlias.jid.in_(jids)
+                WhatsAppChatAlias.account_id == event.account_id,
+                WhatsAppChatAlias.jid.in_(lookup_jids),
             )
         )
     )
     chat_ids = {alias.chat_id for alias in aliases}
-    if len(chat_ids) > 1:
+    if len(chat_ids) > 1 and group is None:
         raise HTTPException(409, "Conflito PN/LID; reconciliação explícita necessária")
-    chat = session.get(WhatsAppChat, next(iter(chat_ids))) if chat_ids else None
+    if group and chat_ids:
+        stored_aliases = session.scalars(select(WhatsAppChatAlias).where(
+            WhatsAppChatAlias.chat_id.in_(chat_ids),
+        ))
+        if any(alias.account_id != event.account_id or alias.jid not in lookup_jids
+               for alias in stored_aliases):
+            raise HTTPException(409, "Conversa contém alias fora da reconciliação aprovada")
+    chats = {chat.id: chat for chat in session.scalars(select(WhatsAppChat).where(
+        WhatsAppChat.id.in_(chat_ids), WhatsAppChat.account_id == event.account_id,
+    ))}
+    if len(chats) != len(chat_ids):
+        raise HTTPException(409, "Identidade de conversa incompatível com a conta")
+    chat = None
+    if len(chat_ids) > 1:
+        # The lease row already serializes ingestion. Do not acquire state locks before
+        # conversation locks: UI deletion locks the conversation before its tombstones.
+        states = list(session.scalars(select(WhatsAppMessageState).where(
+            WhatsAppMessageState.chat_id.in_(chat_ids),
+            WhatsAppMessageState.external_message_id == event.message_id,
+            WhatsAppMessageState.from_me == event.from_me,
+        )))
+        if len(states) > 1:
+            raise HTTPException(409, "Mensagem ambígua entre as conversas reconciliadas")
+        if states:
+            chat = chats[states[0].chat_id]
+        else:
+            primary = next((alias for alias in aliases if alias.jid == event.chat_jid), None)
+            if primary is None:
+                raise HTTPException(409, "Conversa primária sem identificação inequívoca")
+            chat = chats[primary.chat_id]
+    elif chat_ids:
+        chat = chats[next(iter(chat_ids))]
     if chat is None:
         chat = WhatsAppChat(account_id=event.account_id)
         session.add(chat)
@@ -263,12 +365,11 @@ def apply_event(
             return "pending"
         if event.sent_at is None or event.sender_jid is None:
             raise HTTPException(422, "Mensagem original incompleta")
-        contact = ensure_contact(
+        contact = ensure_event_contact(
             session,
             conversation.id,
+            event,
             event.sender_name or event.sender_jid,
-            event.sender_jid,
-            event.sender_jid_alt,
         )
         job = ImportJob(
             conversation_id=conversation.id,
@@ -312,12 +413,12 @@ def apply_event(
     ):
         return "ignored"
     if event.sender_jid:
-        matched_sender = ensure_contact(
+        matched_sender = ensure_event_contact(
             session,
             conversation.id,
+            event,
             event.sender_name or message.sender_name_snapshot or event.sender_jid,
-            event.sender_jid,
-            event.sender_jid_alt,
+            preferred_contact_id=message.sender_contact_id,
         )
         if matched_sender.id != message.sender_contact_id:
             raise HTTPException(409, "Edição com remetente incompatível")

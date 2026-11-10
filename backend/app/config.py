@@ -4,8 +4,17 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class WhatsAppChatAliasGroup(BaseModel):
+    """An operator-approved native PN/LID equivalence, scoped to one account."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    account_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    pn_jid: str = Field(max_length=180, pattern=r"^\d+@s\.whatsapp\.net$")
+    lid_jid: str = Field(max_length=180, pattern=r"^\d+@lid$")
 
 
 class Settings(BaseSettings):
@@ -52,6 +61,18 @@ class Settings(BaseSettings):
     connector_url: str = "http://127.0.0.1:3001"
     connector_max_events: int = Field(default=500000, ge=100, le=5000000)
     connector_max_pending: int = Field(default=5000, ge=10, le=50000)
+    whatsapp_chat_alias_groups: list[WhatsAppChatAliasGroup] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def check_chat_alias_groups(self) -> "Settings":
+        seen: set[tuple[str, str]] = set()
+        for group in self.whatsapp_chat_alias_groups:
+            for jid in (group.pn_jid, group.lid_jid):
+                key = (group.account_id, jid)
+                if key in seen:
+                    raise ValueError("WhatsApp alias groups must be disjoint within each account")
+                seen.add(key)
+        return self
 
     @model_validator(mode="after")
     def check_providers(self) -> "Settings":

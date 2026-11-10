@@ -15,6 +15,8 @@ x-runtime: &runtime
 x-backend-environment: &backend-environment
   DATABASE_URL: ${MEMORIA_DATABASE_URL:?}
   AI_CREDENTIALS_KEY_FILE: /run/secrets/ai_key
+  # Explicit operator approval only; no automatic merging of existing histories.
+  WHATSAPP_CHAT_ALIAS_GROUPS: ${WHATSAPP_CHAT_ALIAS_GROUPS:-[]}
 
 services:
   db:

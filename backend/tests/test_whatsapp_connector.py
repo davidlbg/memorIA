@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
 import json
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from uuid import uuid4
@@ -15,6 +17,7 @@ from app.config import get_settings
 from app.integrations.providers import MockEmbeddingProvider, MockLLMProvider, ProviderError
 from app.main import create_app
 from app.models.entities import (
+    Contact,
     Conversation,
     ImportJob,
     Memory,
@@ -452,6 +455,260 @@ def test_accounts_and_proven_chat_aliases_are_separate(db: sessionmaker[Session]
         with db() as session:
             assert session.scalar(select(func.count()).select_from(Conversation)) == 2
             assert session.scalar(select(func.count()).select_from(Message)) == 2
+
+
+@contextmanager
+def approved_alias_group(monkeypatch: pytest.MonkeyPatch, account: str = ACCOUNT) -> Iterator[None]:
+    with monkeypatch.context() as patch:
+        patch.setenv("WHATSAPP_CHAT_ALIAS_GROUPS", json.dumps([{
+            "account_id": account,
+            "pn_jid": "5511999999999@s.whatsapp.net",
+            "lid_jid": "888@lid",
+        }]))
+        get_settings.cache_clear()
+        try:
+            yield
+        finally:
+            get_settings.cache_clear()
+
+
+def test_explicit_pn_lid_reconciliation_preserves_both_histories(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="PN_ORIGINAL")).raise_for_status()
+        deliver(client, owner, event(
+            message_id="LID_ORIGINAL", chat_jid="888@lid", sender_jid="888@lid",
+        )).raise_for_status()
+        with db() as session:
+            originals = {m.external_message_id: (m.id, m.conversation_id, m.content)
+                         for m in session.scalars(select(Message))}
+            conversations = set(session.scalars(select(Conversation.id)))
+        joined = event(message_id="PAIR_PROOF", chat_jid="888@lid",
+                       chat_jid_alt="5511999999999@s.whatsapp.net", sender_jid="888@lid")
+        assert deliver(client, owner, joined).status_code == 409
+        with approved_alias_group(monkeypatch):
+            response = deliver(client, owner, joined)
+            assert response.status_code == 200, response.text
+            assert response.json()["accepted"] == 1
+            replay = event(message_id="LID_ORIGINAL", origin="whatsapp_history")
+            response = deliver(client, owner, replay)
+            assert response.status_code == 200, response.text
+            assert response.json()["ignored"] == 1
+        with db() as session:
+            assert set(session.scalars(select(Conversation.id))) == conversations
+            for key, (identifier, conversation, content) in originals.items():
+                message = session.get(Message, identifier)
+                assert message is not None
+                assert (message.external_message_id, message.conversation_id, message.content) == (
+                    key, conversation, content,
+                )
+            assert session.scalar(select(func.count()).select_from(Message)) == 3
+            added = session.scalar(select(Message).where(Message.external_message_id == "PAIR_PROOF"))
+            assert added is not None and added.conversation_id == originals["LID_ORIGINAL"][1]
+
+
+def test_reconciled_aliases_edit_and_revoke_in_the_original_conversation(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="PN")).raise_for_status()
+        deliver(client, owner, event(message_id="LID", chat_jid="888@lid", sender_jid="888@lid")).raise_for_status()
+        with db() as session:
+            before = {m.external_message_id: (m.id, m.conversation_id, m.sender_contact_id)
+                      for m in session.scalars(select(Message))}
+        with approved_alias_group(monkeypatch):
+            response = deliver(client, owner, event(message_id="LID", event_type="message.edit",
+                version_ms=BASE_VERSION + 1000, text="Eu trabalho como médica."))
+            assert response.status_code == 200, response.text
+            response = deliver(client, owner, event(message_id="PN", chat_jid="888@lid",
+                sender_jid="888@lid", event_type="message.revoke", text="", version_ms=None))
+            assert response.status_code == 200, response.text
+        with db() as session:
+            for key, identity in before.items():
+                m = session.get(Message, identity[0])
+                assert m is not None and (m.id, m.conversation_id, m.sender_contact_id) == identity
+                assert m.content == ("" if key == "PN" else "Eu trabalho como médica.")
+
+
+def test_reconciled_aliases_concurrently_deduplicate_a_native_message(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="FIRST_PN")).raise_for_status()
+        deliver(client, owner, event(message_id="FIRST_LID", chat_jid="888@lid", sender_jid="888@lid")).raise_for_status()
+    bodies = [EventBatch.model_validate({**owner, "items": [{"sequence": 1, "event": item}]}) for item in (
+        event(message_id="CONCURRENT"),
+        event(message_id="CONCURRENT", chat_jid="888@lid", sender_jid="888@lid"),
+    )]
+    def submit(body: EventBatch) -> int:
+        with db.begin() as session:
+            return ingest_events(session, body).accepted
+    with approved_alias_group(monkeypatch), ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(submit, bodies)) == [0, 1]
+    with db() as session:
+        assert session.scalar(select(func.count()).select_from(Message).where(Message.external_message_id == "CONCURRENT")) == 1
+        assert session.scalar(select(func.count()).select_from(Conversation)) == 2
+
+
+def test_reconciliation_preserves_deleted_history_tombstones(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="PN_KEEP")).raise_for_status()
+        deliver(client, owner, event(message_id="LID_DELETE", chat_jid="888@lid", sender_jid="888@lid")).raise_for_status()
+        with db() as session:
+            conversation = session.scalar(select(Message.conversation_id).where(Message.external_message_id == "LID_DELETE"))
+        client.delete(f"/api/v1/conversations/{conversation}", headers=public_headers()).raise_for_status()
+        with approved_alias_group(monkeypatch):
+            response = deliver(client, owner, event(message_id="LID_DELETE", origin="whatsapp_history"))
+            assert response.status_code == 200, response.text
+            assert response.json()["ignored"] == 1
+        with db() as session:
+            assert session.scalar(select(func.count()).select_from(Conversation)) == 1
+            assert session.scalar(select(func.count()).select_from(Message)) == 1
+
+
+def test_ambiguous_reconciled_message_rolls_back_the_whole_batch(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="COLLISION")).raise_for_status()
+        deliver(client, owner, event(message_id="COLLISION", chat_jid="888@lid", sender_jid="888@lid")).raise_for_status()
+        with approved_alias_group(monkeypatch):
+            response = deliver(client, owner, event(message_id="MUST_ROLL_BACK"),
+                               event(message_id="COLLISION", origin="whatsapp_history"))
+            assert response.status_code == 409
+        with db() as session:
+            assert session.scalar(select(func.count()).select_from(Message)) == 2
+            assert session.scalar(select(func.count()).select_from(WhatsAppEventRecord)) == 2
+            assert all(c.external_alias is None for c in session.scalars(select(Contact)))
+
+
+def test_alias_approval_does_not_cross_accounts_or_accept_a_third_identity(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="PN")).raise_for_status()
+        deliver(client, owner, event(message_id="LID", chat_jid="888@lid", sender_jid="888@lid")).raise_for_status()
+        joined = event(message_id="NO_APPROVAL", chat_jid_alt="888@lid")
+        with approved_alias_group(monkeypatch, account="b" * 64):
+            assert deliver(client, owner, joined).status_code == 409
+        with approved_alias_group(monkeypatch):
+            assert deliver(client, owner, event(message_id="THIRD", chat_jid_alt="999@lid")).status_code == 409
+        with db() as session:
+            assert session.scalar(select(func.count()).select_from(Message)) == 2
+
+
+def test_peer_alias_is_not_assigned_to_our_outgoing_contact(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        with approved_alias_group(monkeypatch):
+            deliver(client, owner, event(from_me=True, sender_jid="5511888888888@s.whatsapp.net",
+                                       chat_jid_alt="888@lid")).raise_for_status()
+        with db() as session:
+            contact = session.scalar(select(Contact))
+            assert contact is not None and contact.external_identifier == "5511888888888@s.whatsapp.net"
+            assert contact.external_alias is None
+
+
+def test_explicit_reconciliation_preserves_legacy_duplicate_peer_contacts(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="PN_CONTACT")).raise_for_status()
+        # The old connector could learn the chat alias on an outgoing message,
+        # then create a second peer contact when an unpaired LID event arrived.
+        deliver(client, owner, event(message_id="SELF", from_me=True, chat_jid="888@lid",
+            chat_jid_alt="5511999999999@s.whatsapp.net", sender_jid="5511888888888@s.whatsapp.net")).raise_for_status()
+        deliver(client, owner, event(message_id="LID_CONTACT", chat_jid="888@lid", sender_jid="888@lid")).raise_for_status()
+        with db() as session:
+            contacts = {c.external_identifier: c.id for c in session.scalars(select(Contact))}
+            assert len(contacts) == 3
+            identities = {m.external_message_id: (m.id, m.conversation_id, m.sender_contact_id)
+                          for m in session.scalars(select(Message))}
+        with approved_alias_group(monkeypatch):
+            response = deliver(client, owner, event(message_id="NEW_CONTACT_EVENT", chat_jid="888@lid",
+                sender_jid="888@lid", sender_jid_alt="5511999999999@s.whatsapp.net"))
+            assert response.status_code == 200, response.text
+            response = deliver(client, owner, event(message_id="PN_CONTACT", chat_jid="888@lid",
+                sender_jid="888@lid", event_type="message.edit", version_ms=BASE_VERSION + 1000,
+                text="Eu trabalho como arquiteta."))
+            assert response.status_code == 200, response.text
+        with db() as session:
+            assert {c.external_identifier: c.id for c in session.scalars(select(Contact))} == contacts
+            for identity in identities.values():
+                m = session.get(Message, identity[0])
+                assert m is not None and (m.id, m.conversation_id, m.sender_contact_id) == identity
+            added = session.scalar(select(Message).where(Message.external_message_id == "NEW_CONTACT_EVENT"))
+            assert added is not None and added.sender_contact_id == contacts["888@lid"]
+
+
+def test_unapproved_contacts_keep_native_sender_routing_with_a_chat_alternate(
+    db: sessionmaker[Session],
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="PN_PEER")).raise_for_status()
+        deliver(client, owner, event(message_id="SELF_LEARNS_CHAT", from_me=True,
+            chat_jid="888@lid", chat_jid_alt="5511999999999@s.whatsapp.net",
+            sender_jid="5511888888888@s.whatsapp.net")).raise_for_status()
+        deliver(client, owner, event(message_id="LID_PEER", chat_jid="888@lid", sender_jid="888@lid")).raise_for_status()
+        with db() as session:
+            before = {c.external_identifier: (c.id, c.external_alias) for c in session.scalars(select(Contact))}
+        response = deliver(client, owner, event(message_id="UNAPPROVED_CHAT_ALT", chat_jid="888@lid",
+            chat_jid_alt="5511999999999@s.whatsapp.net", sender_jid="888@lid"))
+        assert response.status_code == 200, response.text
+        with db() as session:
+            assert {c.external_identifier: (c.id, c.external_alias) for c in session.scalars(select(Contact))} == before
+
+
+@pytest.mark.parametrize("outgoing", [False, True])
+def test_approved_peer_identifier_cannot_be_claimed_as_a_third_senders_alternate(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, outgoing: bool,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="PEER")).raise_for_status()
+        with db() as session:
+            original = session.scalar(select(Contact))
+            assert original is not None
+            identity = (original.id, original.external_identifier, original.external_alias)
+        with approved_alias_group(monkeypatch):
+            response = deliver(client, owner, event(message_id="THIRD_SENDER", from_me=outgoing,
+                sender_jid="5511888888888@s.whatsapp.net", sender_jid_alt="5511999999999@s.whatsapp.net"))
+            assert response.status_code == 409
+        with db() as session:
+            contact = session.get(Contact, identity[0])
+            assert contact is not None and (contact.id, contact.external_identifier, contact.external_alias) == identity
+            assert session.scalar(select(func.count()).select_from(Message)) == 1
+
+
+def test_chat_with_a_stored_third_alias_cannot_reconcile_cross_history_revocations(
+    db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app()) as client:
+        owner = lease(client)
+        deliver(client, owner, event(message_id="PN")).raise_for_status()
+        deliver(client, owner, event(message_id="THIRD_HISTORY", chat_jid="999@lid",
+            chat_jid_alt="5511999999999@s.whatsapp.net", sender_jid="999@lid")).raise_for_status()
+        deliver(client, owner, event(message_id="LID", chat_jid="888@lid", sender_jid="888@lid")).raise_for_status()
+        with approved_alias_group(monkeypatch):
+            response = deliver(client, owner, event(message_id="THIRD_HISTORY", chat_jid="888@lid",
+                sender_jid="888@lid", event_type="message.revoke", text="", version_ms=None))
+            assert response.status_code == 409
+        with db() as session:
+            message = session.scalar(select(Message).where(Message.external_message_id == "THIRD_HISTORY"))
+            assert message is not None and message.delivery_state == "active" and message.content
 
 
 def test_replay_payload_collision_and_expired_fence_rejected(db: sessionmaker[Session]) -> None:
